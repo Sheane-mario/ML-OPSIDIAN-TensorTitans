@@ -118,9 +118,12 @@ class FeatureEngine:
         df = self._apply_target_encoding(df)
 
         # Select and order features
-        for col in self.feature_columns:
-            if col not in df.columns:
-                df[col] = self.medians.get(col, 0.0)
+        missing_cols = {col: self.medians.get(col, 0.0) for col in self.feature_columns if col not in df.columns}
+        if missing_cols:
+            # We assign to multiple columns at once instead of in a loop
+            # to avoid Pandas PerformanceWarning: DataFrame is highly fragmented.
+            missing_df = pd.DataFrame([missing_cols], index=df.index)
+            df = pd.concat([df, missing_df], axis=1)
 
         df = df[self.feature_columns]
 

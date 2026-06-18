@@ -13,19 +13,26 @@ from fastapi.testclient import TestClient
 # Mock the database before importing the app
 @pytest.fixture(autouse=True)
 def mock_db():
-    """Mock the database dependency for all tests."""
-    mock_session = MagicMock()
-
-    with patch('api.database.init_db'), \
-         patch('api.database.get_db', return_value=iter([mock_session])):
-        yield mock_session
+    """Mock the database initialization for all tests."""
+    with patch('api.main.init_db'):
+        yield
 
 
 @pytest.fixture
 def client():
     """Create a test client for the FastAPI app."""
     from api.main import app
-    return TestClient(app)
+    from api.database import get_db
+    
+    # Properly override the dependency in FastAPI
+    mock_session = MagicMock()
+    app.dependency_overrides[get_db] = lambda: iter([mock_session])
+    
+    # Use context manager to trigger lifespan events (like model loading)
+    with TestClient(app) as test_client:
+        yield test_client
+        
+    app.dependency_overrides.clear()
 
 
 class TestHealthEndpoint:
