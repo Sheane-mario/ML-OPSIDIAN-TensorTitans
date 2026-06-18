@@ -7,7 +7,7 @@ these constraints with a 422 Validation Error.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 
 
@@ -431,3 +431,77 @@ class DistrictOverviewResponse(BaseModel):
     highest_risk: str
     lowest_risk: str
     avg_risk_score: float
+
+
+# ─── Counterfactual Planner Schemas ──────────────────────────────────────────
+
+class OptimizePlanRequest(BaseModel):
+    """Constraints for generating a counterfactual mitigation plan."""
+    district: District = Field(default=District.COLOMBO)
+    model_version: ModelVersion = Field(default=ModelVersion.V13)
+    target_risk_level: Literal["Low", "Medium", "High", "Critical"] = Field(
+        default="Medium"
+    )
+    max_steps: int = Field(default=3, ge=1, le=5)
+    budget_profile: Literal["low_cost", "balanced", "aggressive"] = Field(
+        default="balanced"
+    )
+    allowed_features: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Actionable features available to the optimizer. "
+            "When omitted, all supported actionable features are used."
+        ),
+    )
+
+
+class PlanStep(BaseModel):
+    """A single accepted feature change in an optimized mitigation plan."""
+    feature: str
+    feature_label: str
+    category: str
+    from_value: float
+    to_value: float
+    score_before: float
+    score_after: float
+    absolute_reduction: float
+    relative_reduction_pct: float
+    cost_level: str
+    rationale: str
+
+
+class SearchTraceItem(BaseModel):
+    """One candidate evaluation recorded during optimization."""
+    step: int
+    tried_feature: str
+    tried_value: float
+    resulting_score: float
+    resulting_risk_level: Literal["Low", "Medium", "High", "Critical"]
+    accepted: bool
+
+
+class AlternativePlan(BaseModel):
+    """A ranked alternative to the recommended mitigation plan."""
+    name: str
+    optimized_score: float
+    optimized_risk_level: Literal["Low", "Medium", "High", "Critical"]
+    target_reached: bool
+    risk_reduction_pct: float
+    steps: List[PlanStep]
+
+
+class OptimizePlanResponse(BaseModel):
+    """Result of the counterfactual mitigation plan search."""
+    district: str
+    model_version: str
+    baseline_score: float
+    baseline_risk_level: Literal["Low", "Medium", "High", "Critical"]
+    target_risk_level: Literal["Low", "Medium", "High", "Critical"]
+    target_score_threshold: float
+    target_reached: bool
+    optimized_score: float
+    optimized_risk_level: Literal["Low", "Medium", "High", "Critical"]
+    risk_reduction_pct: float
+    recommended_plan: List[PlanStep]
+    search_trace: List[SearchTraceItem]
+    alternatives: List[AlternativePlan]
