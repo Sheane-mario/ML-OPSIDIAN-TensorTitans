@@ -26,15 +26,23 @@ const ALL_DISTRICTS = [
   'Mullaitivu', 'Vavuniya', 'Batticaloa', 'Ampara', 'Trincomalee',
   'Kurunegala', 'Puttalam', 'Anuradhapura', 'Polonnaruwa', 'Badulla',
   'Monaragala', 'Ratnapura', 'Kegalle',
-];
+] as const;
 
 const TARGET_LEVELS = ['Low', 'Medium', 'High'] as const;
+type RiskLevel = 'Low' | 'Medium' | 'High' | 'Critical';
+type ModelVersion = 'v13' | 'v18_titan' | 'v20_colossus';
+type BudgetProfile = 'low_cost' | 'balanced' | 'aggressive';
+type District = (typeof ALL_DISTRICTS)[number];
 
 const BUDGET_PROFILES = [
   { value: 'low_cost', label: 'Low Cost', description: 'Favor practical, lower-cost actions' },
   { value: 'balanced', label: 'Balanced', description: 'Balance impact and implementation cost' },
   { value: 'aggressive', label: 'Aggressive', description: 'Prioritize maximum risk reduction' },
-] as const;
+] as const satisfies ReadonlyArray<{
+  value: BudgetProfile;
+  label: string;
+  description: string;
+}>;
 
 const ACTIONABLE_FEATURES = [
   { key: 'drainage_index', label: 'Drainage System', category: 'Infrastructure' },
@@ -43,7 +51,18 @@ const ACTIONABLE_FEATURES = [
   { key: 'nearest_hospital_km', label: 'Hospital Distance', category: 'Healthcare' },
   { key: 'distance_to_river_m', label: 'River Setback', category: 'Geography' },
   { key: 'built_up_percent', label: 'Built-Up Area', category: 'Land Use' },
-];
+] as const;
+
+type ActionableFeature = (typeof ACTIONABLE_FEATURES)[number]['key'];
+
+interface OptimizePlanRequest {
+  district: District;
+  model_version: ModelVersion;
+  target_risk_level: RiskLevel;
+  max_steps: number;
+  budget_profile: BudgetProfile;
+  allowed_features?: string[];
+}
 
 interface PlanStep {
   feature: string;
@@ -64,14 +83,14 @@ interface SearchTraceItem {
   tried_feature: string;
   tried_value: number;
   resulting_score: number;
-  resulting_risk_level: string;
+  resulting_risk_level: RiskLevel;
   accepted: boolean;
 }
 
 interface AlternativePlan {
   name: string;
   optimized_score: number;
-  optimized_risk_level: string;
+  optimized_risk_level: RiskLevel;
   target_reached: boolean;
   risk_reduction_pct: number;
   steps: PlanStep[];
@@ -81,19 +100,19 @@ interface OptimizePlanResponse {
   district: string;
   model_version: string;
   baseline_score: number;
-  baseline_risk_level: string;
-  target_risk_level: string;
+  baseline_risk_level: RiskLevel;
+  target_risk_level: RiskLevel;
   target_score_threshold: number;
   target_reached: boolean;
   optimized_score: number;
-  optimized_risk_level: string;
+  optimized_risk_level: RiskLevel;
   risk_reduction_pct: number;
   recommended_plan: PlanStep[];
   search_trace: SearchTraceItem[];
   alternatives: AlternativePlan[];
 }
 
-function getRiskColor(level: string): string {
+function getRiskColor(level: RiskLevel): string {
   switch (level) {
     case 'Low': return '#22c55e';
     case 'Medium': return '#f59e0b';
@@ -106,6 +125,13 @@ function getRiskColor(level: string): string {
 function formatFeature(feature: string): string {
   return ACTIONABLE_FEATURES.find(item => item.key === feature)?.label
     ?? feature.replaceAll('_', ' ');
+}
+
+function formatActionValue(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 100) return value.toFixed(0);
+  if (magnitude >= 10) return value.toFixed(1);
+  return value.toFixed(2);
 }
 
 function PlanStepCard({ step, index }: { step: PlanStep; index: number }) {
@@ -173,9 +199,9 @@ function PlanStepCard({ step, index }: { step: PlanStep; index: number }) {
           color: 'var(--text-secondary)',
           fontVariantNumeric: 'tabular-nums',
         }}>
-          <span>{step.from_value.toFixed(2)}</span>
+          <span>{formatActionValue(step.from_value)}</span>
           <ArrowRight size={14} />
-          <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>{step.to_value.toFixed(2)}</span>
+          <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>{formatActionValue(step.to_value)}</span>
         </div>
         <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '0.78rem', lineHeight: 1.5 }}>
           {step.rationale}
@@ -195,18 +221,19 @@ function PlanStepCard({ step, index }: { step: PlanStep; index: number }) {
 }
 
 export default function OptimizePage() {
-  const [district, setDistrict] = useState('Colombo');
+  const [district, setDistrict] = useState<District>('Colombo');
   const [targetRiskLevel, setTargetRiskLevel] = useState<(typeof TARGET_LEVELS)[number]>('Medium');
-  const [budgetProfile, setBudgetProfile] = useState('balanced');
+  const [budgetProfile, setBudgetProfile] = useState<BudgetProfile>('balanced');
   const [maxSteps, setMaxSteps] = useState(3);
-  const [allowedFeatures, setAllowedFeatures] = useState<string[]>(
+  const [allowedFeatures, setAllowedFeatures] = useState<ActionableFeature[]>(
     ACTIONABLE_FEATURES.map(feature => feature.key),
   );
   const [result, setResult] = useState<OptimizePlanResponse | null>(null);
+  const [resultMaxSteps, setResultMaxSteps] = useState(3);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const toggleFeature = useCallback((feature: string) => {
+  const toggleFeature = useCallback((feature: ActionableFeature) => {
     setAllowedFeatures(current => (
       current.includes(feature)
         ? current.filter(item => item !== feature)
@@ -225,17 +252,19 @@ export default function OptimizePage() {
     setResult(null);
 
     try {
+      const requestBody: OptimizePlanRequest = {
+        district,
+        model_version: 'v13',
+        target_risk_level: targetRiskLevel,
+        max_steps: maxSteps,
+        budget_profile: budgetProfile,
+        allowed_features: allowedFeatures,
+      };
+
       const response = await fetch(`${API_URL}/api/optimize-plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          district,
-          model_version: 'v13',
-          target_risk_level: targetRiskLevel,
-          max_steps: maxSteps,
-          budget_profile: budgetProfile,
-          allowed_features: allowedFeatures,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -246,7 +275,9 @@ export default function OptimizePage() {
         throw new Error(detail);
       }
 
-      setResult(await response.json());
+      const responseBody: OptimizePlanResponse = await response.json();
+      setResult(responseBody);
+      setResultMaxSteps(requestBody.max_steps);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -285,7 +316,7 @@ export default function OptimizePage() {
                 <select
                   id="optimize-district"
                   value={district}
-                  onChange={event => setDistrict(event.target.value)}
+                  onChange={event => setDistrict(event.target.value as District)}
                 >
                   {ALL_DISTRICTS.map(item => <option key={item} value={item}>{item}</option>)}
                 </select>
@@ -311,7 +342,7 @@ export default function OptimizePage() {
                 <select
                   id="budget-profile"
                   value={budgetProfile}
-                  onChange={event => setBudgetProfile(event.target.value)}
+                  onChange={event => setBudgetProfile(event.target.value as BudgetProfile)}
                 >
                   {BUDGET_PROFILES.map(profile => (
                     <option key={profile.value} value={profile.value}>{profile.label}</option>
@@ -434,6 +465,19 @@ export default function OptimizePage() {
                 <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '0.8rem' }}>
                   Target: {result.target_risk_level} (&lt; {result.target_score_threshold.toFixed(2)})
                 </p>
+                {!result.target_reached && (
+                  <p style={{
+                    color: 'var(--text-secondary)',
+                    margin: '0.65rem auto 0',
+                    maxWidth: '330px',
+                    fontSize: '0.78rem',
+                    lineHeight: 1.5,
+                  }}>
+                    The target was not reached within {resultMaxSteps} plan
+                    {resultMaxSteps === 1 ? ' step' : ' steps'}. This is the lowest-risk
+                    improving plan found within that limit.
+                  </p>
+                )}
                 <div className="section-divider" />
                 <div style={{ display: 'flex', justifyContent: 'space-around', gap: '1rem' }}>
                   <div>
@@ -510,9 +554,13 @@ export default function OptimizePage() {
               </div>
             ) : (
               <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
-                <CheckCircle2 size={38} color="#22c55e" style={{ marginBottom: '0.5rem' }} />
+                {result.target_reached
+                  ? <CheckCircle2 size={38} color="#22c55e" style={{ marginBottom: '0.5rem' }} />
+                  : <XCircle size={38} color="#f59e0b" style={{ marginBottom: '0.5rem' }} />}
                 <p style={{ margin: 0 }}>
-                  No mitigation steps are required for this target, or no allowed action improved the score.
+                  {result.target_reached
+                    ? 'The district baseline already satisfies this target, so no mitigation steps are required.'
+                    : `No allowed intervention improved the score within the ${resultMaxSteps}-step search limit.`}
                 </p>
               </div>
             )}
@@ -553,7 +601,7 @@ export default function OptimizePage() {
                       <tr key={`${item.step}-${item.tried_feature}-${item.tried_value}-${index}`}>
                         <td>{item.step}</td>
                         <td>{formatFeature(item.tried_feature)}</td>
-                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{item.tried_value.toFixed(3)}</td>
+                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatActionValue(item.tried_value)}</td>
                         <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{item.resulting_score.toFixed(4)}</td>
                         <td>
                           <span className={`risk-badge ${item.resulting_risk_level.toLowerCase()}`}>
@@ -569,7 +617,9 @@ export default function OptimizePage() {
                 </table>
               ) : (
                 <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>
-                  The baseline already met the target, so no candidates were evaluated.
+                  {result.target_reached
+                    ? 'The baseline already met the target, so no candidates were evaluated.'
+                    : 'No supported candidates were available under the selected intervention constraints.'}
                 </p>
               )}
             </div>
@@ -609,7 +659,7 @@ export default function OptimizePage() {
                       {alternative.steps.length > 0 ? alternative.steps.map((step, stepIndex) => (
                         <div key={`${step.feature}-${stepIndex}`} style={{ padding: '0.45rem 0', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
                           <strong style={{ color: 'var(--text-primary)' }}>{stepIndex + 1}. {step.feature_label}</strong>
-                          {' '}{step.from_value.toFixed(2)} → {step.to_value.toFixed(2)}
+                          {' '}{formatActionValue(step.from_value)} → {formatActionValue(step.to_value)}
                         </div>
                       )) : (
                         <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', margin: 0 }}>

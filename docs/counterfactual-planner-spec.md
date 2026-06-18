@@ -1,14 +1,24 @@
-# Feature 1: AI Counterfactual Flood Mitigation Planner
+# AI Counterfactual Flood Mitigation Planner
 
-## 1. Feature Goal
+## Purpose
 
-Generate a practical, ranked mitigation plan that changes a limited number of controllable district features to reduce the model-predicted flood risk to a requested level. The planner must reuse the existing inference pipeline without changing model behavior.
+The AI Mitigation Planner is a decision-support simulation tool. It searches for a small set of controllable feature changes that reduce the existing model's predicted flood-risk score for a district.
 
-## 2. User Story
+It does not guarantee flood prevention, establish causal effects, or replace engineering and policy review. It does not retrain, modify, or replace the prediction model, feature pipeline, MLflow setup, or model artifacts.
 
-As an urban planner, I want to select a district, target risk level, intervention limit, budget profile, and allowed mitigation features so that I can receive an explainable plan showing the smallest practical set of changes likely to reach the target.
+## User Flow
 
-## 3. Backend API Contract
+From `/optimize`, a user selects:
+
+- one of the 25 supported districts;
+- a target risk level: `Low`, `Medium`, or `High`;
+- a budget profile: `low_cost`, `balanced`, or `aggressive`;
+- a maximum of 1 to 5 plan steps; and
+- the actionable features the planner may change.
+
+The page shows baseline and optimized risk, target status, recommended steps, the candidate search trace, and alternative plans.
+
+## API Contract
 
 ### Endpoint
 
@@ -34,14 +44,7 @@ As an urban planner, I want to select a district, target risk level, interventio
 }
 ```
 
-Validation:
-
-- `district` must be one of the existing 25 districts.
-- `model_version` must be an existing supported model version.
-- `target_risk_level` must be `Low`, `Medium`, or `High`.
-- `max_steps` must be between 1 and 6.
-- `budget_profile` must be `conservative`, `balanced`, or `aggressive`.
-- `allowed_features` must be non-empty, unique, and limited to supported actionable features.
+`target_risk_level` accepts `Low`, `Medium`, `High`, or `Critical`. The frontend intentionally offers the first three because a `Critical` target uses a threshold of `1.0` and is rarely useful. `allowed_features` is optional; omitting it enables all supported actionable features. Unknown feature names are ignored safely.
 
 ### Response
 
@@ -49,134 +52,118 @@ Validation:
 {
   "district": "Colombo",
   "model_version": "v13",
-  "baseline_score": 0.8123,
-  "baseline_risk_level": "Critical",
+  "baseline_score": 0.6123,
+  "baseline_risk_level": "High",
   "target_risk_level": "Medium",
   "target_score_threshold": 0.5,
   "target_reached": true,
-  "optimized_score": 0.4217,
+  "optimized_score": 0.4817,
   "optimized_risk_level": "Medium",
-  "risk_reduction_pct": 48.09,
+  "risk_reduction_pct": 21.33,
   "recommended_plan": [
     {
-      "step": 1,
       "feature": "drainage_index",
       "feature_label": "Drainage System",
       "category": "Infrastructure",
       "from_value": 0.38,
-      "to_value": 0.65,
-      "score_before": 0.8123,
-      "score_after": 0.6901,
-      "marginal_reduction_pct": 15.04,
-      "estimated_cost": 0.54
+      "to_value": 0.85,
+      "score_before": 0.6123,
+      "score_after": 0.4817,
+      "absolute_reduction": 0.1306,
+      "relative_reduction_pct": 21.33,
+      "cost_level": "low",
+      "rationale": "Improve drainage capacity to move stormwater away from exposed areas."
     }
   ],
   "search_trace": [
     {
-      "iteration": 1,
-      "candidates_evaluated": 18,
-      "selected_feature": "drainage_index",
-      "selected_value": 0.65,
-      "resulting_score": 0.6901
+      "step": 1,
+      "tried_feature": "drainage_index",
+      "tried_value": 0.85,
+      "resulting_score": 0.4817,
+      "resulting_risk_level": "Medium",
+      "accepted": true
     }
   ],
   "alternatives": [
     {
-      "rank": 2,
-      "optimized_score": 0.4472,
-      "risk_reduction_pct": 44.95,
+      "name": "Alternative via Infrastructure Score",
+      "optimized_score": 0.4972,
+      "optimized_risk_level": "Medium",
       "target_reached": true,
-      "total_estimated_cost": 1.61,
-      "plan": []
+      "risk_reduction_pct": 18.8,
+      "steps": []
     }
   ]
 }
 ```
 
-Scores are rounded to four decimal places and percentages to two. `estimated_cost` is a normalized planning cost from 0 to 1 per action, not a currency value. If the target cannot be reached, return the best valid plan with `target_reached: false`. Invalid input returns HTTP 422; an unavailable model version returns HTTP 400.
+Scores in this example are illustrative. If the target is not reached, the response returns the best improving plan found within `max_steps` with `target_reached: false`.
 
-Risk thresholds remain consistent with `get_risk_level()`:
+## Risk Thresholds
 
-| Target | Score threshold |
+| Target | Required score |
 |---|---:|
-| Low | 0.25 |
-| Medium | 0.50 |
-| High | 0.75 |
+| Low | `< 0.25` |
+| Medium | `< 0.50` |
+| High | `< 0.75` |
+| Critical | `< 1.00` |
 
-## 4. Optimization Algorithm
+## Search Algorithm
 
-Use deterministic, bounded beam search over counterfactual feature changes:
+The implementation uses deterministic, bounded greedy search:
 
-1. Build the baseline from existing district defaults using `_build_raw_features()`.
-2. Score the baseline through the unchanged `model_manager.predict()` method.
-3. Generate candidate values for each allowed feature between its current value and configured improvement bound. Candidate density and maximum change depend on the budget profile.
-4. At each iteration, expand plans by one unused feature change, score candidates, and rank them by:
-   - target reached;
-   - lower predicted risk;
-   - fewer actions;
-   - lower normalized cost.
-5. Keep a small fixed beam of the best unique plans and continue until the target is reached, `max_steps` is exhausted, or no candidate improves the score.
-6. Return the best plan, a compact iteration trace, and up to three materially distinct alternatives.
+1. Build a complete baseline from district defaults. Unknown districts use generic defaults.
+2. Score the baseline through the unchanged `model_manager.predict(...)` path.
+3. Generate bounded candidate values for each allowed, unused actionable feature.
+4. Score every candidate as a black-box counterfactual.
+5. Select the best improving candidate after applying the budget-profile preference.
+6. Repeat until the target is reached, `max_steps` is exhausted, or no candidate improves risk.
 
-Budget profiles control permitted change magnitude and cost penalty:
+The supported actions are:
 
-| Profile | Change magnitude | Cost penalty |
-|---|---|---|
-| Conservative | Small | High |
-| Balanced | Moderate | Medium |
-| Aggressive | Full configured range | Low |
+- `drainage_index`
+- `infrastructure_score`
+- `nearest_evac_km`
+- `nearest_hospital_km`
+- `distance_to_river_m`
+- `built_up_percent`
 
-The search must be deterministic for identical requests, cap total inference calls, reject non-improving actions, avoid changing the same feature twice, and never mutate district defaults or request data. The model score is an estimate, not a causal guarantee.
+The `low_cost` profile favors drainage, infrastructure, and built-up-area actions. `balanced` trades off reduction against cost weight. `aggressive` prioritizes maximum raw score reduction.
 
-## 5. Frontend UX
+## Implementation Files
 
-Add a `/planner` page containing:
+- `api/schemas.py` — request and response validation.
+- `api/counterfactual_planner.py` — candidate generation and black-box search.
+- `api/main.py` — `POST /api/optimize-plan`.
+- `api/tests/test_counterfactual_planner.py` — focused verification and artifact-integrity checks.
+- `frontend/src/app/optimize/page.tsx` — planner UI.
+- `frontend/src/components/Navbar.tsx` — `/optimize` navigation.
 
-- district, model, target risk, maximum steps, and budget selectors;
-- checkboxes for allowed intervention features;
-- an **Optimize Plan** action with loading and validation states;
-- baseline versus optimized risk gauges;
-- target reached/not reached status;
-- an ordered recommended-plan timeline showing before/after values, marginal impact, and normalized cost;
-- a concise search summary and expandable alternatives;
-- a disclaimer that recommendations are model-based planning scenarios.
+## Running and Verification
 
-Add a **Planner** link to the existing navbar. Reuse the current visual system and components where practical, and preserve responsive behavior.
+Start the full stack:
 
-## 6. Files to Modify
+```bash
+docker compose up --build
+```
 
-- `api/schemas.py` — optimization request, plan-step, trace, alternative, and response schemas.
-- `api/counterfactual_planner.py` — candidate generation, cost profiles, beam search, and response assembly.
-- `api/main.py` — register `POST /api/optimize-plan` and reuse existing district/actionable-feature configuration.
-- `api/tests/test_counterfactual_planner.py` — deterministic algorithm and edge-case tests using mocked inference.
-- `api/tests/test_api.py` — endpoint contract and validation tests.
-- `frontend/src/app/planner/page.tsx` — planner form and results.
-- `frontend/src/components/Navbar.tsx` — Planner navigation link.
-- `frontend/src/app/globals.css` — planner-specific responsive styling.
+Then open:
 
-No changes are expected in `api/model_manager.py`, `api/feature_engine.py`, `mlops/`, or model artifact directories.
+- Planner UI: [http://localhost:3000/optimize](http://localhost:3000/optimize)
+- API documentation: [http://localhost:8000/docs](http://localhost:8000/docs)
 
-## 7. Acceptance Criteria
+Run focused backend verification:
 
-- A valid request returns HTTP 200 and the documented response structure.
-- Baseline and candidate scores are produced only through `model_manager.predict()`.
-- Returned plans use only requested `allowed_features` and contain at most `max_steps` actions.
-- Each selected action strictly improves the score relative to its preceding step.
-- `target_reached` matches the requested score threshold and optimized score.
-- If the baseline already satisfies the target, the response has an empty plan and unchanged optimized score.
-- If no plan reaches the target, the endpoint returns the best improving plan with `target_reached: false`.
-- Identical requests produce identical plans and ordering.
-- Search execution has a fixed inference-call cap and does not perform unbounded combinatorial search.
-- Unsupported features and invalid constraints return validation errors.
-- The `/planner` page displays success, unreachable-target, loading, empty, and API-error states.
-- Existing simulator, intervention, comparison, district, analytics, model, and health tests continue to pass.
-- The feature runs locally and in Docker without internet access.
+```bash
+python -m pytest api/tests/test_counterfactual_planner.py -q
+```
 
-## 8. Explicit Non-Goals
+Run the frontend production build:
 
-- Do not retrain, fine-tune, or recalibrate any model.
-- Do not change model files, model artifacts, feature engineering, MLflow setup, or existing prediction behavior.
-- Do not claim causal effectiveness or replace engineering, hydrological, financial, or policy review.
-- Do not produce currency-level project estimates, construction schedules, or procurement plans.
-- Do not remove or break existing simulator, interventions, comparison, districts, analytics, or health pages.
-- Do not add external APIs or require internet access at runtime.
+```bash
+cd frontend
+npm run build
+```
+
+The backend verification checks response fields, unknown-feature handling, step limits, API registration, existing health/simulation imports, and SHA-256 equality of model artifacts before and after planner execution.
