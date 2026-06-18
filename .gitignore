@@ -11,5 +11,7 @@ __pycache__
 .next
 node_modules
 
+.env.prod
+
 *.joblib
 mlops/artifacts/
